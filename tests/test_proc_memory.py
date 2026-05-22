@@ -39,9 +39,9 @@ class TestGetPhysFootprintDarwin:
         # already-counted pages, giving baseline == after in CI).
         mm = mmap.mmap(-1, size)
         try:
-            # Write unique data to each page so pages are dirty and resident,
-            # and cannot be deduplicated or trivially compressed.
-            for i in range(0, size, 4096):
+            # Write unique data to each OS page so pages are dirtied and
+            # resident when measuring phys_footprint.
+            for i in range(0, size, mmap.PAGESIZE):
                 mm[i : i + 8] = i.to_bytes(8, "little")
             after = get_phys_footprint()
         finally:
