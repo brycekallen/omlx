@@ -241,7 +241,7 @@ mlx-lmで利用可能なすべての関数呼び出し形式、JSONスキーマ�
 | GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
 | MiniMax | Namespaced `<minimax:tool_call>` |
 | Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
+| Kimi K2 / K2.6 | `<\|tool_calls_section_begin\|>` |
 | Longcat | `<longcat_tool_call>` |
 
 上記に記載されていないモデルでも、チャットテンプレートが`tools`を受け入れ、出力が認識可能な`<tool_call>` XML形式を使用していれば動作する可能性があります。ツール呼び出しを含むストリーミングリクエストはすべてのコンテンツをバッファリングし、完了時に結果を送信します。

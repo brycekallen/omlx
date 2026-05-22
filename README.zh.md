@@ -241,7 +241,7 @@ OpenAI 和 Anthropic API 的直接替代品。支持流式使用统计（`stream
 | GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
 | MiniMax | Namespaced `<minimax:tool_call>` |
 | Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
+| Kimi K2 / K2.6 | `<\|tool_calls_section_begin\|>` |
 | Longcat | `<longcat_tool_call>` |
 
 上表未列出的模型，只要聊天模板支持 `tools` 参数且输出采用可识别的 `<tool_call>` XML 格式，也有可能正常工作。针对支持工具调用的流式请求，系统会增量发射助手文本，同时隐藏已知的工具调用控制标记；结构化工具调用将在完成整个回合解析后发射。

@@ -241,7 +241,7 @@ mlx-lm에서 사용 가능한 모든 함수 호출 형식, JSON 스키마 검증
 | GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
 | MiniMax | Namespaced `<minimax:tool_call>` |
 | Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
+| Kimi K2 / K2.6 | `<\|tool_calls_section_begin\|>` |
 | Longcat | `<longcat_tool_call>` |
 
 위에 나열되지 않은 모델도 채팅 템플릿이 `tools`를 허용하고 출력이 인식 가능한 `<tool_call>` XML 형식을 사용하면 작동할 수 있습니다. Tool calling이 포함된 스트리밍 요청은 모든 콘텐츠를 버퍼링한 후 완료 시 결과를 전송합니다.
