@@ -29,7 +29,7 @@ class TestGetPhysFootprintDarwin:
         assert get_phys_footprint(pid=0) == 0
 
     def test_includes_python_heap(self):
-        import mmap as _mmap
+        import mmap
 
         baseline = get_phys_footprint()
         size = 64 * 1024 * 1024
@@ -37,12 +37,12 @@ class TestGetPhysFootprintDarwin:
         # already present in the process phys_footprint (bypasses Python's
         # allocator page reuse which causes bytearray to silently recycle
         # already-counted pages, giving baseline == after in CI).
-        mm = _mmap.mmap(-1, size)
+        mm = mmap.mmap(-1, size)
         try:
             # Write unique data to each page so pages are dirty and resident,
             # and cannot be deduplicated or trivially compressed.
             for i in range(0, size, 4096):
-                mm[i : i + 4] = i.to_bytes(4, "little")
+                mm[i : i + 8] = i.to_bytes(8, "little")
             after = get_phys_footprint()
         finally:
             mm.close()
