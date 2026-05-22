@@ -411,8 +411,39 @@ _KIMI_NAME_ARGS_RE = re.compile(
     re.DOTALL,
 )
 _KIMI_FUNC_ID_RE = re.compile(r"(?:functions\.)?(\w[\w.-]*):\d+")
-# JSON object with up to one level of nesting (covers typical tool arguments)
-_KIMI_JSON_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}")
+
+
+def _find_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Scan *text* left-to-right and return the first valid JSON object dict.
+
+    Handles arbitrary nesting depth by extending the candidate string one
+    character at a time from each ``{`` until ``json.loads`` succeeds or
+    the string is exhausted.  This is intentionally simple and robust rather
+    than regex-based, which would require a recursive pattern or fixed-depth
+    approximation.
+    """
+    start = 0
+    while True:
+        idx = text.find("{", start)
+        if idx < 0:
+            return None
+        depth = 0
+        for end in range(idx, len(text)):
+            ch = text[end]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[idx : end + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass
+                    break
+        start = idx + 1
 
 
 def _parse_kimi_tool_calls_lenient(
@@ -493,16 +524,7 @@ def _parse_kimi_tool_calls_lenient(
         return cleaned, None
 
     func_name = func_id_match.group(1).strip()
-    args_dict: dict = {}
-    for json_match in _KIMI_JSON_RE.finditer(kimi_section):
-        candidate = json_match.group(0)
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                args_dict = parsed
-                break
-        except json.JSONDecodeError:
-            continue
+    args_dict: Dict[str, Any] = _find_first_json_object(kimi_section) or {}
 
     tool_calls.append(
         ToolCall(

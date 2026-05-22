@@ -2140,3 +2140,21 @@ class TestParseKimiToolCallsLenient:
         assert calls[0].function.name == "list_files"
         assert json.loads(calls[0].function.arguments) == {"path": "."}
         assert "<|" not in cleaned
+
+    def test_deeply_nested_args_recovered(self):
+        """Arguments with deeper nesting are correctly extracted by
+        _find_first_json_object (not limited to one-level like a fixed regex)."""
+        text = (
+            "<|tool_calls_section_end|>"
+            "functions.call_api:0"
+            "<|tool_call_end|>"
+            '{"headers": {"Authorization": "Bearer tok"}, "body": {"data": {"key": "v"}}}'
+            "<|tool_call_begin|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert calls[0].function.name == "call_api"
+        args = json.loads(calls[0].function.arguments)
+        assert args["headers"]["Authorization"] == "Bearer tok"
+        assert args["body"]["data"]["key"] == "v"
+        assert "<|" not in cleaned
