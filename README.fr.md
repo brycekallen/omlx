@@ -241,7 +241,7 @@ Supporte tous les formats d'appel de fonctions disponibles dans mlx-lm, la valid
 | GLM (4.7, 5) | XML `<arg_key>/<arg_value>` |
 | MiniMax | `<minimax:tool_call>` |
 | Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
+| Kimi K2 / K2.6 | `<\|tool_calls_section_begin\|>` |
 | Longcat | `<longcat_tool_call>` |
 
 Les modèles non listés ci-dessus peuvent quand même fonctionner si leur template de chat accepte `tools` et que leur sortie utilise un format XML `<tool_call>` reconnu. Pour le streaming avec outils, le texte de l'assistant est émis de façon incrémentale tandis que les balises de contrôle des appels d'outils sont supprimées du contenu visible ; les appels d'outils structurés sont émis après parsing du tour complet.

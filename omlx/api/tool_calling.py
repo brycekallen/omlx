@@ -8,8 +8,18 @@ Uses mlx-lm's modular tool parser system to support multiple model formats:
 - function_gemma: Google Gemma function calling format
 - glm47: GLM-4.7 format
 - qwen3_coder: Qwen3 Coder XML format
+- kimi_k2: Kimi K2 / K2.6 format (``<|tool_calls_section_begin|>`` envelope)
 
 The tool parser is automatically selected based on the model's chat template.
+
+Kimi K2.6 note: when the model's tokenizer carries the Mistral byte-regex
+bug (transformers warning about ``fix_mistral_regex``), the outer
+``<|tool_calls_section_begin|>`` token may be decoded as
+``<|tool_calls_section_end|>`` (inverted).  A lenient fallback parser
+(``_parse_kimi_tool_calls_lenient``) recovers the function name and
+arguments from the individual ``<|tool_call_begin|>`` / ``<|tool_call_end|>``
+blocks and from the unique ``<|tool_call_argument_begin|>`` boundary even
+when the outer section markers are scrambled.
 
 Also includes structured output (JSON Schema) utilities:
 - parse_json_output: Extract JSON from model output
@@ -28,6 +38,20 @@ from jsonschema import validate, ValidationError
 from .openai_models import FunctionCall, ResponseFormat, ToolCall, ToolDefinition
 
 logger = logging.getLogger(__name__)
+
+# Regex that matches any Kimi K2 / K2.6 control token.  Used to detect kimi
+# output and to strip residual markers from cleaned text.
+_KIMI_TOOL_MARKERS_RE = re.compile(
+    r"<\|(?:"
+    r"tool_calls_section_begin"
+    r"|tool_calls_section_end"
+    r"|tool_call_begin"
+    r"|tool_call_end"
+    r"|tool_call_argument_begin"
+    r"|media_begin"
+    r"|media_end"
+    r")\|>"
+)
 
 
 def _serialize_tool_call_arguments(arguments: Any) -> str:
@@ -375,6 +399,153 @@ def _parse_gemma4_tool_call_fallback(text: str) -> Union[dict, list]:
     return results[0] if len(results) == 1 else results
 
 
+# ---------------------------------------------------------------------------
+# Kimi K2 / K2.6 lenient fallback parser
+# ---------------------------------------------------------------------------
+
+_KIMI_STANDARD_BLOCK_RE = re.compile(
+    r"<\|tool_call_begin\|>(.*?)<\|tool_call_end\|>", re.DOTALL
+)
+_KIMI_NAME_ARGS_RE = re.compile(
+    r"^(?:functions\.)?(.+?):\d+\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*$",
+    re.DOTALL,
+)
+_KIMI_FUNC_ID_RE = re.compile(r"(?:functions\.)?(\w[\w.-]*):\d+")
+
+
+def _find_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Scan *text* left-to-right and return the first valid JSON object dict.
+
+    Handles arbitrary nesting depth by extending the candidate string one
+    character at a time from each ``{`` until ``json.loads`` succeeds or
+    the string is exhausted.  This is intentionally simple and robust rather
+    than regex-based, which would require a recursive pattern or fixed-depth
+    approximation.
+    """
+    start = 0
+    while True:
+        idx = text.find("{", start)
+        if idx < 0:
+            return None
+        depth = 0
+        for end in range(idx, len(text)):
+            ch = text[end]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[idx : end + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass
+                    break
+        start = idx + 1
+
+
+def _parse_kimi_tool_calls_lenient(
+    text: str,
+) -> Tuple[str, Optional[List[ToolCall]]]:
+    """Lenient fallback parser for Kimi K2 / K2.6 tool calls.
+
+    The primary path uses mlx-lm's ``kimi_k2`` parser which expects the
+    outer ``<|tool_calls_section_begin|>…<|tool_calls_section_end|>``
+    envelope.  When the Mistral tokenizer byte-regex bug is present the
+    ``<|tool_calls_section_begin|>`` token may be decoded as
+    ``<|tool_calls_section_end|>`` (or in random order), making the
+    section-level split find no matches and causing tool calls to be lost.
+
+    This function recovers by operating in two passes:
+
+    1. **Standard inner blocks** – scans for well-formed
+       ``<|tool_call_begin|>…<|tool_call_end|>`` pairs (the individual
+       call boundaries, which are smaller and less likely to be scrambled).
+    2. **Lenient scan** – when no inner blocks are found, scans the kimi
+       section for the unique ``<|tool_call_argument_begin|>`` boundary,
+       extracts the function id via the ``functions.NAME:N`` pattern, and
+       finds the JSON argument object anywhere in the section.
+
+    In both cases all kimi control tokens are stripped from the returned
+    ``cleaned_text`` so they never appear in the API response.
+
+    Returns:
+        Tuple of (cleaned_text, tool_calls or None)
+    """
+    if not _KIMI_TOOL_MARKERS_RE.search(text):
+        return text, None
+
+    tool_calls: List[ToolCall] = []
+
+    # Pass 1: well-formed individual call blocks.
+    for block_match in _KIMI_STANDARD_BLOCK_RE.finditer(text):
+        content = block_match.group(1).strip()
+        m = _KIMI_NAME_ARGS_RE.match(content)
+        if not m:
+            continue
+        func_name = m.group(1).strip()
+        args_str = m.group(2).strip()
+        try:
+            args: Any = json.loads(args_str) if args_str else {}
+        except json.JSONDecodeError:
+            args = {}
+        tool_calls.append(
+            ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=func_name,
+                    arguments=_serialize_tool_call_arguments(args),
+                ),
+            )
+        )
+
+    if tool_calls:
+        cleaned = _KIMI_TOOL_MARKERS_RE.sub("", text).strip()
+        return cleaned, tool_calls
+
+    # Pass 2: malformed marker order – find first kimi marker, treat the
+    # remainder of the text as the kimi section and mine it for a function
+    # id and a JSON argument object.
+    first_marker_match = _KIMI_TOOL_MARKERS_RE.search(text)
+    if not first_marker_match:
+        return text, None
+
+    kimi_start = first_marker_match.start()
+    kimi_section = text[kimi_start:]
+    prose_prefix = text[:kimi_start]
+
+    func_id_match = _KIMI_FUNC_ID_RE.search(kimi_section)
+    if not func_id_match:
+        # Cannot identify the function name; strip markers and return no calls.
+        cleaned = (prose_prefix + _KIMI_TOOL_MARKERS_RE.sub("", kimi_section)).strip()
+        return cleaned, None
+
+    func_name = func_id_match.group(1).strip()
+    args_dict: Dict[str, Any] = _find_first_json_object(kimi_section) or {}
+
+    tool_calls.append(
+        ToolCall(
+            id=f"call_{uuid.uuid4().hex[:8]}",
+            type="function",
+            function=FunctionCall(
+                name=func_name,
+                arguments=_serialize_tool_call_arguments(args_dict),
+            ),
+        )
+    )
+    logger.debug(
+        "Recovered Kimi tool call via lenient fallback (malformed section markers): "
+        "func=%r args=%r",
+        func_name,
+        args_dict,
+    )
+    cleaned = prose_prefix.strip()
+    return cleaned, tool_calls
+
+
 def parse_tool_calls(
     text: str,
     tokenizer: Any,
@@ -546,11 +717,29 @@ def parse_tool_calls(
     if "[Calling tool:" in cleaned_text or "[Tool call:" in cleaned_text:
         return _parse_bracket_tool_calls(cleaned_text)
 
+    # Fallback: lenient Kimi K2 / K2.6 parser.
+    # Handles Kimi K2.6 output where the Mistral tokenizer byte-regex bug
+    # scrambles ``<|tool_calls_section_begin|>`` into
+    # ``<|tool_calls_section_end|>`` (or any other malformed ordering),
+    # causing the native kimi_k2 section-level split above to find no
+    # matches.  The lenient parser operates on individual
+    # ``<|tool_call_begin|>``/``<|tool_call_end|>`` blocks or falls back
+    # to mining the kimi section for a ``functions.NAME:N`` id and a JSON
+    # argument object when those block markers are also scrambled.
+    if _KIMI_TOOL_MARKERS_RE.search(cleaned_text):
+        fb_text, fb_calls = _parse_kimi_tool_calls_lenient(cleaned_text)
+        if fb_calls:
+            return fb_text, fb_calls
+        # Markers present but no call could be recovered – use the cleaned
+        # text (markers stripped) so they never appear in the API response.
+        cleaned_text = fb_text
+
     # All parsing attempts exhausted. Strip known tool-call markers so raw
     # control markup never leaks into the API response.  Models whose markers
     # overlap with the generic ``<tool_call>`` tag already returned above via
     # Branch 2 (_parse_xml_tool_calls), so this only affects models with
-    # unique markers (Gemma 4, Mistral, Pythonic, Kimi K2, Longcat, etc.).
+    # unique markers (Gemma 4, Mistral, Pythonic, Kimi K2, Kimi K2.6,
+    # Longcat, etc.).
     if getattr(tokenizer, "has_tool_calling", False):
         _start = getattr(tokenizer, "tool_call_start", None)
         _end = getattr(tokenizer, "tool_call_end", None)

@@ -15,6 +15,7 @@ from omlx.api.tool_calling import (
     ToolCallStreamFilter,
     _gemma4_args_to_json_robust,
     _parse_gemma4_tool_call_fallback,
+    _parse_kimi_tool_calls_lenient,
     _serialize_tool_call_arguments,
     build_json_system_prompt,
     convert_tools_for_template,
@@ -1927,3 +1928,233 @@ class TestSerializeToolCallArguments:
             result = _serialize_tool_call_arguments("[1, 2]")
         assert result == "{}"
         assert any("non-dict" in r.message for r in caplog.records)
+
+
+class TestParseKimiToolCallsLenient:
+    """Tests for ``_parse_kimi_tool_calls_lenient`` and the kimi K2.6 fallback
+    path in ``parse_tool_calls``.
+
+    Kimi K2 / K2.6 uses a ``<|tool_calls_section_begin|>`` /
+    ``<|tool_calls_section_end|>`` outer envelope with individual
+    ``<|tool_call_begin|>…<|tool_call_end|>`` blocks inside.  When the
+    Mistral tokenizer byte-regex bug is present the outer markers can be
+    decoded in the wrong order (e.g. section_end instead of section_begin),
+    causing the native ``kimi_k2`` section-level split to find no matches.
+    """
+
+    # ------------------------------------------------------------------
+    # _parse_kimi_tool_calls_lenient direct tests
+    # ------------------------------------------------------------------
+
+    def test_no_kimi_markers_returns_unchanged(self):
+        """Text with no kimi markers is passed through unchanged."""
+        text = "Hello world"
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert cleaned == text
+        assert calls is None
+
+    def test_standard_inner_block_format(self):
+        """Well-formed inner <|tool_call_begin|>…<|tool_call_end|> block is parsed."""
+        text = (
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>"
+            "functions.get_weather:0<|tool_call_argument_begin|>"
+            '{"city": "Tokyo"}'
+            "<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function.name == "get_weather"
+        assert json.loads(calls[0].function.arguments) == {"city": "Tokyo"}
+        assert "<|" not in cleaned
+
+    def test_standard_inner_block_no_functions_prefix(self):
+        """Function id without ``functions.`` prefix is also handled."""
+        text = (
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>"
+            "multiply:0<|tool_call_argument_begin|>"
+            '{"a": 3, "b": 4}'
+            "<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert calls[0].function.name == "multiply"
+        assert json.loads(calls[0].function.arguments) == {"a": 3, "b": 4}
+
+    def test_multiple_standard_blocks(self):
+        """Multiple inner blocks yield multiple ToolCalls."""
+        text = (
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>"
+            "functions.get_weather:0<|tool_call_argument_begin|>"
+            '{"city": "Tokyo"}'
+            "<|tool_call_end|>"
+            "<|tool_call_begin|>"
+            "functions.get_time:1<|tool_call_argument_begin|>"
+            '{"tz": "UTC"}'
+            "<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert len(calls) == 2
+        assert calls[0].function.name == "get_weather"
+        assert calls[1].function.name == "get_time"
+        assert "<|" not in cleaned
+
+    def test_malformed_inverted_section_markers(self):
+        """Reproduces the Kimi K2.6 Mistral regex bug output:
+        section_end appears instead of section_begin, individual call
+        markers also in wrong order.  Function name and args are still
+        recoverable via the lenient scan.
+        """
+        # Simulates the output reported in mlx-lm #1262:
+        # reasoning text, then inverted markers, then function id, JSON, noise
+        text = (
+            "I'll get the weather.<|tool_calls_section_end|>"
+            "<|tool_call_argument_begin|>"
+            "functions.get_weather:0"
+            "<|tool_call_end|>"
+            '{"city": "Tokyo"}'
+            "<|media_begin|>"
+            "<|tool_call_begin|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function.name == "get_weather"
+        assert json.loads(calls[0].function.arguments) == {"city": "Tokyo"}
+        # Prose before the first kimi marker must be preserved
+        assert "I'll get the weather" in cleaned
+        # All kimi markers must be stripped
+        assert "<|" not in cleaned
+
+    def test_malformed_only_section_end_marker_no_function(self):
+        """Kimi section marker present but no function id – returns cleaned text,
+        no calls."""
+        text = "Hello<|tool_calls_section_end|>world"
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is None
+        assert "<|" not in cleaned
+
+    def test_prose_before_kimi_section_preserved(self):
+        """Text before the first kimi marker is kept in cleaned output."""
+        text = (
+            "Sure, let me help.<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>"
+            "functions.foo:0<|tool_call_argument_begin|>{}"
+            "<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert "Sure, let me help" in cleaned
+        assert "<|" not in cleaned
+
+    # ------------------------------------------------------------------
+    # Integration: parse_tool_calls kimi K2.6 fallback path
+    # ------------------------------------------------------------------
+
+    def _make_kimi_tokenizer(self):
+        """Return a mock tokenizer configured as a kimi_k2 tokenizer."""
+        from mlx_lm.tool_parsers import kimi_k2 as _kk2  # type: ignore[import]
+
+        tok = MagicMock(spec=[])
+        tok.has_tool_calling = True
+        tok.tool_call_start = _kk2.tool_call_start   # "<|tool_calls_section_begin|>"
+        tok.tool_call_end = _kk2.tool_call_end         # "<|tool_calls_section_end|>"
+        tok.tool_parser = _kk2.parse_tool_call
+        return tok
+
+    def test_integration_well_formed_kimi_k2_via_native_parser(self):
+        """Well-formed Kimi K2 output is parsed by the native kimi_k2 parser
+        (not the lenient fallback)."""
+        try:
+            tok = self._make_kimi_tokenizer()
+        except ImportError:
+            pytest.skip("mlx_lm not installed")
+
+        text = (
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>"
+            "functions.get_weather:0<|tool_call_argument_begin|>"
+            '{"city": "Tokyo"}'
+            "<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        )
+        cleaned, calls = parse_tool_calls(text, tok)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function.name == "get_weather"
+        assert json.loads(calls[0].function.arguments) == {"city": "Tokyo"}
+        assert "<|" not in cleaned
+
+    def test_integration_malformed_markers_kimi_k26_fallback(self):
+        """Malformed kimi K2.6 output (inverted section markers) is recovered
+        by the lenient fallback inside parse_tool_calls."""
+        try:
+            tok = self._make_kimi_tokenizer()
+        except ImportError:
+            pytest.skip("mlx_lm not installed")
+
+        # The Mistral regex bug causes section_end to appear first;
+        # individual call markers may also be scrambled.
+        text = (
+            "I'll get the weather.<|tool_calls_section_end|>"
+            "<|tool_call_argument_begin|>"
+            "functions.get_weather:0"
+            "<|tool_call_end|>"
+            '{"city": "Tokyo"}'
+            "<|media_begin|>"
+            "<|tool_call_begin|>"
+        )
+        cleaned, calls = parse_tool_calls(text, tok)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function.name == "get_weather"
+        assert json.loads(calls[0].function.arguments) == {"city": "Tokyo"}
+        assert "I'll get the weather" in cleaned
+        assert "<|" not in cleaned
+
+    def test_integration_malformed_no_native_parser(self):
+        """When there is no native kimi parser but kimi markers are present,
+        the lenient fallback still recovers the tool call."""
+        tok = MagicMock(spec=[])
+        tok.has_tool_calling = False
+
+        text = (
+            "Okay.<|tool_calls_section_end|>"
+            "<|tool_call_argument_begin|>"
+            "functions.list_files:0"
+            "<|tool_call_end|>"
+            '{"path": "."}'
+            "<|tool_call_begin|>"
+        )
+        cleaned, calls = parse_tool_calls(text, tok)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function.name == "list_files"
+        assert json.loads(calls[0].function.arguments) == {"path": "."}
+        assert "<|" not in cleaned
+
+    def test_deeply_nested_args_recovered(self):
+        """Arguments with deeper nesting are correctly extracted by
+        _find_first_json_object (not limited to one-level like a fixed regex)."""
+        text = (
+            "<|tool_calls_section_end|>"
+            "functions.call_api:0"
+            "<|tool_call_end|>"
+            '{"headers": {"Authorization": "Bearer tok"}, "body": {"data": {"key": "v"}}}'
+            "<|tool_call_begin|>"
+        )
+        cleaned, calls = _parse_kimi_tool_calls_lenient(text)
+        assert calls is not None
+        assert calls[0].function.name == "call_api"
+        args = json.loads(calls[0].function.arguments)
+        assert args["headers"]["Authorization"] == "Bearer tok"
+        assert args["body"]["data"]["key"] == "v"
+        assert "<|" not in cleaned
