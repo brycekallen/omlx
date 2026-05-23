@@ -1176,8 +1176,9 @@ class TestPortConflict:
         assert result.pid == 99999
         assert result.is_omlx is False
 
+    @patch.object(ServerManager, "check_health", return_value=True)
     @patch.object(ServerManager, "_is_omlx_server", return_value=True)
-    def test_adopt_success(self, mock_omlx, manager: ServerManager):
+    def test_adopt_success(self, mock_omlx, mock_health, manager: ServerManager):
         """Test adopting an existing oMLX server."""
         result = manager.adopt()
         assert result is True

@@ -15,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/python-3.11+-green" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
 </p>
 
@@ -81,7 +81,7 @@ pip install -e .          # コアのみ
 pip install -e ".[mcp]"   # MCP（Model Context Protocol）サポート付き
 ```
 
-Python 3.10+とApple Silicon（M1/M2/M3/M4）が必要です。
+Python 3.11+とApple Silicon（M1/M2/M3/M4）が必要です。
 
 ## クイックスタート
 

@@ -29,16 +29,25 @@ class TestGetPhysFootprintDarwin:
         assert get_phys_footprint(pid=0) == 0
 
     def test_includes_python_heap(self):
+        import mmap
+
         baseline = get_phys_footprint()
-        # Allocate a sizeable buffer to force phys growth.
-        big = bytearray(64 * 1024 * 1024)
-        # Touch it so pages become resident.
-        for i in range(0, len(big), 4096):
-            big[i] = 1
-        after = get_phys_footprint()
+        size = 64 * 1024 * 1024
+        # Use mmap to get fresh OS pages that are guaranteed not to be
+        # already present in the process phys_footprint (bypasses Python's
+        # allocator page reuse which causes bytearray to silently recycle
+        # already-counted pages, giving baseline == after in CI).
+        mm = mmap.mmap(-1, size)
+        try:
+            # Write unique data to each OS page so pages are dirtied and
+            # resident when measuring phys_footprint.
+            for i in range(0, size, mmap.PAGESIZE):
+                mm[i : i + 8] = i.to_bytes(8, "little")
+            after = get_phys_footprint()
+        finally:
+            mm.close()
         # phys should have grown by at least most of the allocation.
         assert after - baseline > 32 * 1024 * 1024
-        del big
 
 
 class TestGetPhysFootprintFallback:
